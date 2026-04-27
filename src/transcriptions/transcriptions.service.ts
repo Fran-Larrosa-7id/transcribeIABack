@@ -2,15 +2,25 @@ import {
   BadRequestException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
 import { TranscriptionStatus as PrismaTranscriptionStatus } from '@prisma/client';
+import { Queue } from 'bullmq';
 import { promises as fs } from 'node:fs';
+import {
+  PROCESS_TRANSCRIPTION_JOB,
+  TRANSCRIPTION_QUEUE,
+} from './constants/transcription-queue.constants';
 import { CreateTranscriptionDto } from './dto/create-transcription.dto';
+import { TranscriptionStatusResponse } from './dto/transcription-status-response.dto';
+import { TranscriptionStatus } from './enums/transcription-status.enum';
 import {
   formatTranscription,
   TranscriptionJobResponse,
 } from './helpers/format-transcription.helper';
 import { PrismaService } from '../prisma/prisma.service';
+import { TranscriptionProcessingJobData } from './types/transcription-processing-job-data.type';
 
 interface TextDownload {
   filename: string;
@@ -19,12 +29,18 @@ interface TextDownload {
 
 @Injectable()
 export class TranscriptionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @InjectQueue(TRANSCRIPTION_QUEUE)
+    private readonly transcriptionQueue: Queue<TranscriptionProcessingJobData>,
+  ) {}
 
   async create(
     dto: CreateTranscriptionDto,
     file: Express.Multer.File,
   ): Promise<TranscriptionJobResponse> {
+    let shouldRemoveUploadedFile = true;
+
     try {
       const transcription = await this.prisma.transcriptionJob.create({
         data: {
@@ -40,20 +56,24 @@ export class TranscriptionsService {
           generateSummary: dto.generateSummary,
           status: PrismaTranscriptionStatus.pending,
           progress: 0,
-          transcriptText: this.buildInitialMockTranscript(
-            dto.title,
-            file.originalname,
-          ),
-          summary: dto.generateSummary
-            ? 'Resumen mock pendiente de reemplazar por el servicio de IA.'
-            : null,
+          transcriptText: null,
+          summary: null,
         },
       });
+      shouldRemoveUploadedFile = false;
 
-      // Luego este punto deberia publicar un job en BullMQ para procesar audio e IA.
+      await this.enqueueProcessingJob({
+        transcriptionJobId: transcription.id,
+        filePath: transcription.filePath,
+        originalFilename: transcription.originalFilename,
+      });
+
       return formatTranscription(transcription);
     } catch (error) {
-      await this.removeUploadedFile(file.path);
+      if (shouldRemoveUploadedFile) {
+        await this.removeUploadedFile(file.path);
+      }
+
       throw error;
     }
   }
@@ -78,6 +98,31 @@ export class TranscriptionsService {
     return formatTranscription(transcription);
   }
 
+  async getStatus(id: string): Promise<TranscriptionStatusResponse> {
+    const transcription = await this.prisma.transcriptionJob.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        progress: true,
+        errorMessage: true,
+        finishedAt: true,
+      },
+    });
+
+    if (!transcription) {
+      throw new NotFoundException('Transcripcion no encontrada.');
+    }
+
+    return {
+      id: transcription.id,
+      status: transcription.status as TranscriptionStatus,
+      progress: transcription.progress,
+      errorMessage: transcription.errorMessage ?? undefined,
+      finishedAt: transcription.finishedAt?.toISOString(),
+    };
+  }
+
   async retry(id: string): Promise<TranscriptionJobResponse> {
     const transcription = await this.prisma.transcriptionJob.findUnique({
       where: { id },
@@ -100,7 +145,15 @@ export class TranscriptionsService {
         progress: 0,
         errorMessage: null,
         finishedAt: null,
+        transcriptText: null,
+        summary: null,
       },
+    });
+
+    await this.enqueueProcessingJob({
+      transcriptionJobId: updated.id,
+      filePath: updated.filePath,
+      originalFilename: updated.originalFilename,
     });
 
     return formatTranscription(updated);
@@ -187,15 +240,42 @@ export class TranscriptionsService {
     }
   }
 
-  private buildInitialMockTranscript(
-    title: string,
-    originalFilename: string,
-  ): string {
-    return `Transcripcion mock creada para "${title}" desde el archivo "${originalFilename}". El procesamiento real se conectara luego con cola, FFmpeg y proveedor de IA.`;
-  }
-
   private buildCompletedMockTranscript(title: string): string {
     return `Transcripcion mock finalizada para "${title}". Este texto permite integrar y probar el frontend hasta conectar el pipeline real de transcripcion.`;
+  }
+
+  private async enqueueProcessingJob(
+    data: TranscriptionProcessingJobData,
+  ): Promise<void> {
+    try {
+      await this.transcriptionQueue.add(PROCESS_TRANSCRIPTION_JOB, data, {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 1_000,
+        },
+        removeOnComplete: {
+          age: 86_400,
+          count: 1_000,
+        },
+        removeOnFail: {
+          age: 604_800,
+        },
+      });
+    } catch {
+      await this.prisma.transcriptionJob.update({
+        where: { id: data.transcriptionJobId },
+        data: {
+          status: PrismaTranscriptionStatus.failed,
+          errorMessage:
+            'No pudimos encolar la transcripcion. Verifica que Redis este disponible.',
+        },
+      });
+
+      throw new ServiceUnavailableException(
+        'No se pudo iniciar el procesamiento en segundo plano. Verifica Redis.',
+      );
+    }
   }
 
   private slugify(value: string): string {

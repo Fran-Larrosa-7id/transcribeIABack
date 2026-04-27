@@ -18,6 +18,7 @@ import { mkdirSync } from 'node:fs';
 import { extname } from 'node:path';
 import { diskStorage } from 'multer';
 import { CreateTranscriptionDto } from './dto/create-transcription.dto';
+import { TranscriptionStatusResponse } from './dto/transcription-status-response.dto';
 import { audioFileFilter } from './helpers/audio-file-filter.helper';
 import { TranscriptionJobResponse } from './helpers/format-transcription.helper';
 import { TranscriptionsService } from './transcriptions.service';
@@ -75,6 +76,11 @@ export class TranscriptionsController {
     return this.transcriptionsService.findAll();
   }
 
+  @Get(':id/status')
+  getStatus(@Param('id') id: string): Promise<TranscriptionStatusResponse> {
+    return this.transcriptionsService.getStatus(id);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string): Promise<TranscriptionJobResponse> {
     return this.transcriptionsService.findOne(id);
@@ -107,6 +113,7 @@ export class TranscriptionsController {
   }
 
   @Patch(':id/simulate-progress')
+  // Development-only compatibility endpoint. The frontend should poll GET /transcriptions/:id now.
   simulateProgress(@Param('id') id: string): Promise<TranscriptionJobResponse> {
     return this.transcriptionsService.simulateProgress(id);
   }
