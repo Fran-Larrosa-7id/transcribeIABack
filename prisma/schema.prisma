@@ -30,27 +30,44 @@ enum TranscriptionStatus {
 }
 
 model TranscriptionJob {
-  id              String                @id @default(uuid())
-  title           String
+  id               String                @id @default(uuid())
+  title            String
   originalFilename String
-  storedFilename  String
-  filePath        String
-  mimeType        String
-  fileSize        Int
-  durationSeconds Int?
-  language        TranscriptionLanguage
-  model           TranscriptionModel
-  fixPunctuation  Boolean               @default(false)
-  generateSummary Boolean               @default(false)
-  status          TranscriptionStatus    @default(pending)
-  progress        Int                   @default(0)
-  transcriptText  String?
-  summary         String?
-  errorMessage    String?
-  createdAt       DateTime              @default(now())
-  updatedAt       DateTime              @updatedAt
-  finishedAt      DateTime?
+  storedFilename   String
+  filePath         String
+  mimeType         String
+  fileSize         Int
+  durationSeconds  Int?
+  language         TranscriptionLanguage
+  model            TranscriptionModel
+  fixPunctuation   Boolean               @default(false)
+  generateSummary  Boolean               @default(false)
+  status           TranscriptionStatus    @default(pending)
+  progress         Int                   @default(0)
+  transcriptText   String?
+  summary          String?
+  errorMessage     String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+  finishedAt       DateTime?
+  chunks           TranscriptionChunk[]
 
   @@index([createdAt])
   @@index([status])
+}
+
+model TranscriptionChunk {
+  id                 String           @id @default(uuid())
+  transcriptionJobId String
+  index              Int
+  filePath           String
+  filename           String
+  startTimeSeconds   Int
+  endTimeSeconds     Int
+  durationSeconds    Int
+  createdAt          DateTime         @default(now())
+  transcriptionJob   TranscriptionJob @relation(fields: [transcriptionJobId], references: [id], onDelete: Cascade)
+
+  @@unique([transcriptionJobId, index])
+  @@index([transcriptionJobId])
 }

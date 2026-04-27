@@ -5,14 +5,17 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
+import { ConfigService } from '@nestjs/config';
 import { TranscriptionStatus as PrismaTranscriptionStatus } from '@prisma/client';
 import { Queue } from 'bullmq';
 import { promises as fs } from 'node:fs';
+import { join } from 'node:path';
 import {
   PROCESS_TRANSCRIPTION_JOB,
   TRANSCRIPTION_QUEUE,
 } from './constants/transcription-queue.constants';
 import { CreateTranscriptionDto } from './dto/create-transcription.dto';
+import { TranscriptionChunkResponse } from './dto/transcription-chunk-response.dto';
 import { TranscriptionStatusResponse } from './dto/transcription-status-response.dto';
 import { TranscriptionStatus } from './enums/transcription-status.enum';
 import {
@@ -31,6 +34,7 @@ interface TextDownload {
 export class TranscriptionsService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly configService: ConfigService,
     @InjectQueue(TRANSCRIPTION_QUEUE)
     private readonly transcriptionQueue: Queue<TranscriptionProcessingJobData>,
   ) {}
@@ -123,6 +127,34 @@ export class TranscriptionsService {
     };
   }
 
+  async getChunks(id: string): Promise<TranscriptionChunkResponse[]> {
+    const transcription = await this.prisma.transcriptionJob.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+
+    if (!transcription) {
+      throw new NotFoundException('Transcripcion no encontrada.');
+    }
+
+    const chunks = await this.prisma.transcriptionChunk.findMany({
+      where: { transcriptionJobId: id },
+      orderBy: { index: 'asc' },
+    });
+
+    return chunks.map((chunk) => ({
+      id: chunk.id,
+      transcriptionJobId: chunk.transcriptionJobId,
+      index: chunk.index,
+      filePath: chunk.filePath,
+      filename: chunk.filename,
+      startTimeSeconds: chunk.startTimeSeconds,
+      endTimeSeconds: chunk.endTimeSeconds,
+      durationSeconds: chunk.durationSeconds,
+      createdAt: chunk.createdAt.toISOString(),
+    }));
+  }
+
   async retry(id: string): Promise<TranscriptionJobResponse> {
     const transcription = await this.prisma.transcriptionJob.findUnique({
       where: { id },
@@ -138,17 +170,26 @@ export class TranscriptionsService {
       );
     }
 
-    const updated = await this.prisma.transcriptionJob.update({
-      where: { id },
-      data: {
-        status: PrismaTranscriptionStatus.pending,
-        progress: 0,
-        errorMessage: null,
-        finishedAt: null,
-        transcriptText: null,
-        summary: null,
-      },
+    const updated = await this.prisma.$transaction(async (tx) => {
+      await tx.transcriptionChunk.deleteMany({
+        where: { transcriptionJobId: id },
+      });
+
+      return tx.transcriptionJob.update({
+        where: { id },
+        data: {
+          status: PrismaTranscriptionStatus.pending,
+          progress: 0,
+          errorMessage: null,
+          finishedAt: null,
+          transcriptText: null,
+          summary: null,
+          durationSeconds: null,
+        },
+      });
     });
+
+    await this.removeProcessedFiles(id);
 
     await this.enqueueProcessingJob({
       transcriptionJobId: updated.id,
@@ -292,6 +333,24 @@ export class TranscriptionsService {
   private async removeUploadedFile(path: string): Promise<void> {
     try {
       await fs.unlink(path);
+    } catch {
+      return;
+    }
+  }
+
+  private async removeProcessedFiles(
+    transcriptionJobId: string,
+  ): Promise<void> {
+    const processedRoot = this.configService.get<string>(
+      'PROCESSED_AUDIO_DIR',
+      'uploads/transcriptions/processed',
+    );
+
+    try {
+      await fs.rm(join(processedRoot, transcriptionJobId), {
+        recursive: true,
+        force: true,
+      });
     } catch {
       return;
     }

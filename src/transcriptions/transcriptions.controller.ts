@@ -18,6 +18,7 @@ import { mkdirSync } from 'node:fs';
 import { extname } from 'node:path';
 import { diskStorage } from 'multer';
 import { CreateTranscriptionDto } from './dto/create-transcription.dto';
+import { TranscriptionChunkResponse } from './dto/transcription-chunk-response.dto';
 import { TranscriptionStatusResponse } from './dto/transcription-status-response.dto';
 import { audioFileFilter } from './helpers/audio-file-filter.helper';
 import { TranscriptionJobResponse } from './helpers/format-transcription.helper';
@@ -79,6 +80,11 @@ export class TranscriptionsController {
   @Get(':id/status')
   getStatus(@Param('id') id: string): Promise<TranscriptionStatusResponse> {
     return this.transcriptionsService.getStatus(id);
+  }
+
+  @Get(':id/chunks')
+  getChunks(@Param('id') id: string): Promise<TranscriptionChunkResponse[]> {
+    return this.transcriptionsService.getChunks(id);
   }
 
   @Get(':id')
